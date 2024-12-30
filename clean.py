@@ -5,6 +5,8 @@ import sys, argparse
 import pandas as pd
 import numpy as np
 from copy import deepcopy
+import os
+import re
 from lightcurve import (
     DEFAULT_CUT_NAMES,
     Cut,
@@ -28,16 +30,18 @@ UTILITY
 """
 
 
+
 def hexstring_to_int(hexstring):
     return int(hexstring, 16)
 
 
 class OutputReadMe:
     def __init__(self, output_dir, tnsname, cut_list, num_controls=0):
-        filename = f"{output_dir}/{tnsname}/README.md"
-        print(
-            f"\nOpening README.md file for outputting cut information at {filename}..."
-        )
+        filename = f"{output_dir}/README.md"
+        # Ensure the parent directory exists
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+        print(f"\nOpening README.md file for outputting cut information at {filename}...")
         self.f = open(filename, "w+")
         self.tnsname: str = tnsname
         self.cut_list: CutList = cut_list
@@ -324,7 +328,7 @@ class ChiSquareCutTable:
 class CleanLoop:
     def __init__(
         self,
-        input_dir: str,
+        input_dirs: List[str],
         output_dir: str,
         credentials: Credentials,
         sninfo_filename: str = None,
@@ -338,7 +342,7 @@ class CleanLoop:
         self.p: PlotPdf = None
 
         self.credentials: Credentials = credentials
-        self.input_dir: str = input_dir
+        self.input_dirs: List[str] = input_dirs
         self.output_dir: str = output_dir
         self.flux2mag_sigmalimit: float = flux2mag_sigmalimit
         self.overwrite: bool = overwrite
@@ -353,6 +357,50 @@ class CleanLoop:
     def apply_template_correction(self):
         print(f"\nApplying ATLAS template change correction:")
         # TODO: add_template_correction_section
+
+    def find_directories(self) -> List[str]:
+        """
+        Find all target directories based on the input directories provided.
+        Example: Locate subdirectories like 'neutrino1/neutrino1_galaxy0'.
+        """
+        target_dirs = []
+        for base_dir in self.input_dirs:
+            if os.path.exists(base_dir):
+                for root, dirs, _ in os.walk(base_dir):
+                    for dir_name in dirs:
+                        # Match directories like "neutrino_..." but avoid nested paths
+                        full_path = os.path.join(root, dir_name)
+                        if dir_name.startswith("neutrino") and full_path not in target_dirs:
+                            target_dirs.append(full_path)
+        return target_dirs
+    
+    def get_output_path(self, input_dir: str) -> str:
+        """
+        Generate the corresponding output directory based on the input directory structure,
+        excluding the last subdirectory of the input path.
+
+        Args:
+            input_dir (str): The full path of the input directory.
+
+        Returns:
+            str: The corresponding output directory path.
+        """
+        # Define the base directory for input data
+        base_input_dir = os.path.commonpath(self.input_dirs)  # Common base of all input dirs
+
+        # Get the relative path from the base input directory
+        relative_path = os.path.relpath(input_dir, base_input_dir)
+
+        # Remove the last subdirectory from the relative path
+        parent_relative_path = os.path.split(relative_path)[0]
+
+        # Construct the output path using the adjusted relative path
+        output_path = os.path.join(self.output_dir, parent_relative_path)
+
+        # Ensure the output directory exists
+        os.makedirs(output_path, exist_ok=True)
+
+        return output_path
 
     def check_uncert_est(self, cut: Cut, apply_function: Callable, plot: bool = False):
         print(f"\nChecking true uncertainties estimation:")
@@ -452,7 +500,7 @@ class CleanLoop:
                     "ERROR: MJD0 cannot be None. Please provide MJD0 throught the SN info table or --mjd0 argument, or set the use_pre_MJD0_lc field in the config file to False."
                 )
             lc_temp = deepcopy(self.sn.lcs[0])
-            ix = lc_temp.ix_inrange("MJD", uplim=self.sn.mjd0)
+            ix = lc_temp.ix_inrange("MJD", uplim=self.sn.mjd0 + 800) # look ahead time
         else:
             print("Using control light curves to determine contamination and loss")
             if self.sn.num_controls < 1:
@@ -631,14 +679,18 @@ class CleanLoop:
             raise RuntimeError(f"ERROR: Could not load light curves: {str(e)}")
 
         # prepare the light curves for cleaning
-        print()
         self.sn.prep_for_cleaning(verbose=True)
-
+        
+        # Setting directory for cleaned light curves into a seperate neutrino folder
+        neutrino_id = re.search(r"(neutrino_\d+)", tnsname)
+        plot_dir = self.f.f.name.rsplit("/", 1)[0]  # Directory where README.md resides
+        plot_dir = os.path.join(plot_dir, neutrino_id.group(1))
+        os.makedirs(plot_dir, exist_ok=True)
         if plot:
-            # initialize PDF of diagnostic plots
-            self.p = PlotPdf(f"{self.output_dir}/{tnsname}", tnsname, filt=filt)
+            # Initialize PDF of diagnostic plots in the same directory
+            self.p = PlotPdf(plot_dir, tnsname, filt=filt)
 
-            # plot original SN light curve and control light curves
+            # Plot original SN light curve and control light curves
             self.p.plot_SN(
                 self.sn,
                 self.p.get_lims(lc=self.sn.lcs[0]),
@@ -646,7 +698,7 @@ class CleanLoop:
                 plot_template_changes=True,
             )
 
-        # template correction
+        # Template correction
         if apply_template_correction:
             self.apply_template_correction()
 
@@ -700,11 +752,11 @@ class CleanLoop:
         )
 
         # save cleaned SN and control light curves
-        self.sn.save_all(self.output_dir, overwrite=self.overwrite)
+        self.sn.save_all(plot_dir, overwrite=self.overwrite)
 
         if self.cut_list.has("badday_cut"):
             # save averaged SN and control light curves
-            self.avg_sn.save_all(self.output_dir, overwrite=self.overwrite)
+            self.avg_sn.save_all(plot_dir, overwrite=self.overwrite)
 
         if self.cut_list.has("uncert_est"):
             # save uncertainty estimation table
@@ -734,37 +786,53 @@ class CleanLoop:
     ):
         self.cut_list = cut_list
 
-        for obj_index in range(len(tnsnames)):
-            tnsname = tnsnames[obj_index]
-            print(f"\n\tCLEANING LIGHT CURVES FOR: SN {tnsname}")
+        target_dirs = self.find_directories()
+        if not target_dirs:
+            raise RuntimeError('No directories to process')
 
-            make_dir_if_not_exists(f"{output_dir}/{tnsname}")
-            self.f = OutputReadMe(
-                self.output_dir, tnsname, cut_list, num_controls=num_controls
-            )
+        for dir in target_dirs:
+            self.input_dir = dir
+            current_output_dir = self.get_output_path(dir)
+            for obj_index in range(len(tnsnames)):
+                tnsname = tnsnames[obj_index]
+                print(f"\n\tCLEANING LIGHT CURVES FOR: SN {tnsname}")
 
-            if mjd0 is None and (
-                plot or cut_list.get("x2_cut").params["use_pre_mjd0_lc"]
-            ):
-                mjd0, coords = get_mjd0(tnsname, self.sninfo, self.credentials)
-                if not coords is None:
-                    print(f"Setting MJD0 to {mjd0}")
-                    self.sninfo.update_row(tnsname, coords=coords, mjd0=mjd0)
-                    print("Success")
-            else:
-                print(f"\nSetting MJD0 to {mjd0}")
+                #make_dir_if_not_exists(f"{output_dir}/{tnsname}")
+                #check for sub directory in atclean_input
+                check_tns = os.path.join(self.input_dir, tnsname)
+                if not os.path.isdir(check_tns):
+                    continue
+                # Avoid redundant nesting
+                tns_output_dir = os.path.join(current_output_dir, tnsname)
+                #os.makedirs(tns_output_dir, exist_ok=True)
 
-            for filt in filters:
-                self.f.add_filter_section(filt)
-                self.clean_lcs(
-                    tnsname,
-                    mjd0,
-                    filt,
-                    apply_uncert_est_function,
-                    num_controls=num_controls,
-                    apply_template_correction=apply_template_correction,
-                    plot=plot,
+                # Pass the correct path to OutputReadMe
+                self.f = OutputReadMe(
+                    tns_output_dir, tnsname, cut_list, num_controls=num_controls
                 )
+
+                if mjd0 is None and (
+                    plot or cut_list.get("x2_cut").params["use_pre_mjd0_lc"]
+                ):
+                    mjd0, coords = get_mjd0(tnsname, self.sninfo, self.credentials)
+                    if not coords is None:
+                        print(f"Setting MJD0 to {mjd0}")
+                        self.sninfo.update_row(tnsname, coords=coords, mjd0=mjd0)
+                        print("Success")
+                else:
+                    print(f"\nSetting MJD0 to {mjd0}")
+
+                for filt in filters:
+                    self.f.add_filter_section(filt)
+                    self.clean_lcs(
+                        tnsname,
+                        mjd0,
+                        filt,
+                        apply_uncert_est_function,
+                        num_controls=num_controls,
+                        apply_template_correction=apply_template_correction,
+                        plot=plot,
+                    )
 
 
 def parse_config_filters(args, config):
@@ -1026,11 +1094,21 @@ if __name__ == "__main__":
         )
     print(f"\nList of transients to clean: {args.tnsnames}")
 
-    input_dir = config["dir"]["atclean_input"]
+    #input_dir = config["dir"]["atclean_input"]
+    #input_dir = os.path.join(input_dir, f'')
+    base_dir = config["dir"]["atclean_input"]
+
+    # Create a list of input directories
+    input_dir = [
+        os.path.join(base_dir, dir)
+        for dir in os.listdir(base_dir)
+        if os.path.isdir(os.path.join(base_dir, dir))
+    ]
+    
     output_dir = config["dir"]["output"]
     sninfo_filename = config["dir"]["sninfo_filename"]
-    make_dir_if_not_exists(input_dir)
-    make_dir_if_not_exists(output_dir)
+    #make_dir_if_not_exists(input_dir)
+    #make_dir_if_not_exists(output_dir)
     print(f"\nATClean input directory: {input_dir}")
     print(f"Output directory: {output_dir}")
 

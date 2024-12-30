@@ -20,7 +20,7 @@ from getpass import getpass
 from astropy import units as u
 from astropy.coordinates import Angle, SkyCoord
 from lightcurve import Coordinates, Credentials, SnInfoTable, FullLightCurve
-
+from astropy.time import Time
 CTRL_COORDINATES_COLNAMES = [
     "tnsname",
     "control_index",
@@ -269,7 +269,38 @@ class ControlCoordinatesTable:
 """
 DOWNLOADING ATLAS LIGHT CURVES
 """
+def create_neutrino_directories(base_path, tnsnames):
+    """
+    Creates a directory structure where each unique prefix before the first underscore in TNS names
+    becomes a parent directory, and the remaining TNS names form subdirectories.
 
+    Args:
+        base_path (str): The base directory (e.g., atclean_input).
+        tnsnames (list): List of TNS names (e.g., ["neutrino1_galaxy0", "neutrino2_galaxy0"]).
+
+    Returns:
+        dict: A mapping of TNS names to their corresponding directory paths.
+    """
+    # Dictionary to map prefixes to their directories
+    neutrino_dirs = {}
+    tns_dirs = {}
+
+    for tnsname in tnsnames:
+        # Extract everything inbetween first and second delimiter
+        event = tnsname.split("_")[1]
+
+        # Create a neutrino directory if it doesn't exist
+        if f'neutrino_{event}' not in neutrino_dirs:
+            neutrino_dir = os.path.join(base_path, f'neutrino_{event}')
+            os.makedirs(neutrino_dir, exist_ok=True)
+            neutrino_dirs[f'neutrino_{event}'] = neutrino_dir
+
+        # Create a subdirectory for the TNS name
+        tns_dir = os.path.join(neutrino_dirs[f'neutrino_{event}'], tnsname)
+        os.makedirs(tns_dir, exist_ok=True)
+        tns_dirs[tnsname] = tns_dir
+
+    return tns_dirs
 
 # define command line arguments
 def define_args(parser=None, usage=None, conflict_handler="resolve"):
@@ -393,6 +424,7 @@ class DownloadLoop:
         # input/output directories
         self.input_dir = config["dir"]["atclean_input"]
         self.output_dir = config["dir"]["output"]
+        self.tns_dirs = create_neutrino_directories(self.input_dir, self.tnsnames)
         print(f"ATClean input directory: {self.input_dir}")
         print(f"Output directory: {self.output_dir}")
         make_dir_if_not_exists(self.input_dir)
@@ -451,7 +483,7 @@ class DownloadLoop:
             raise RuntimeError(
                 "ERROR: Please specify control light curve downloading (-c or --controls) before using any of the following arguments: --ctrl_coords, --closebright, --num_controls, --radius."
             )
-
+    
     def connect_atlas(self):
         baseurl = "https://fallingstar-data.com/forcedphot"
         resp = requests.post(
@@ -523,12 +555,17 @@ class DownloadLoop:
                 f"ERROR: Could not construct light curve object: {str(e)}. Skipping to next SN..."
             )
             return
-
+        # Use the specific TNS subdirectory
+        tns_dir = self.tns_dirs[tnsname]
         # download SN light curves
+        if args.mjd0 + 200 > float(Time.now().mjd):
+            args.max_mjd = float(Time.now().mjd)   
+        else:
+            args.max_mjd = args.mjd0 + 200
         self.lcs[0].download(
             headers, lookbacktime=args.lookbacktime, max_mjd=args.max_mjd
         )
-        self.lcs[0].save(self.input_dir, tnsname, overwrite=args.overwrite)
+        self.lcs[0].save(tns_dir, tnsname, overwrite=args.overwrite)
 
         # save SN info table
         self.sninfo.save()
@@ -560,13 +597,14 @@ class DownloadLoop:
                 self.lcs[control_index].download(
                     headers, lookbacktime=args.lookbacktime, max_mjd=args.max_mjd
                 )
+
                 self.lcs[control_index].save(
-                    self.input_dir, tnsname, overwrite=args.overwrite
+                    tns_dir, tnsname, overwrite=args.overwrite
                 )
                 self.ctrl_coords.update_row(control_index, self.lcs[control_index])
 
             # save control coordinates table
-            self.ctrl_coords.save(self.input_dir, tnsname=tnsname)
+            self.ctrl_coords.save(tns_dir, tnsname=tnsname)
 
     def loop(self, args):
         print("\nConnecting to ATLAS API...")

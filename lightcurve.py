@@ -592,7 +592,7 @@ class CutList:
 class LimCutsTable:
     def __init__(self, lc: pdastrostatsclass, stn_bound, indices=None):
         self.t = None
-
+        print(indices, 'LOL')
         self.lc = lc
         if indices is None:
             indices = self.lc.getindices()
@@ -1649,7 +1649,8 @@ class FullLightCurve:
     # download the full light curve from ATLAS
     def download(self, headers, lookbacktime=None, max_mjd=None):
         if lookbacktime:
-            min_mjd = float(Time.now().mjd - lookbacktime)
+            min_mjd = max_mjd # previously  = float(Time.now().mjd) - lookbacktime
+            max_mjd = max_mjd + lookbacktime
         else:
             min_mjd = 50000.0
 

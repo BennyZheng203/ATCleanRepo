@@ -396,7 +396,7 @@ class pdastroclass:
             if len(indices)==0:
                 #return an empty list instead of empty tuple
                 return([])
-            # teh first entry is a list, then these are the relevant indices!
+            # the first entry is a list, then these are the relevant indices!
             if isinstance(indices[0],list) or isinstance(indices[0],np.ndarray):
                 return(indices[0])
             else:
